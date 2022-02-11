@@ -32,14 +32,15 @@
 
 #![allow(dead_code)]
 
+use crate::bitmap::align_word;
 use arrow::datatypes::{DataType, Schema};
 use std::sync::Arc;
-use crate::bitmap::align_word;
 
 mod bitmap;
+mod error;
+mod jit;
 mod reader;
 mod writer;
-mod error;
 
 const UTF8_DEFAULT_SIZE: usize = 20;
 const BINARY_DEFAULT_SIZE: usize = 100;
@@ -123,11 +124,12 @@ fn supported(schema: &Arc<Schema>) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::error::*;
-    use std::sync::Arc;
-    use crate::reader::read_as_batch;
+    use crate::jit::CodeStore;
+    use crate::reader::{cook_read_row, new_jit_with_reader, read_as_batch, read_as_batch_jni};
     use crate::writer::write_batch_unchecked;
     use arrow::record_batch::RecordBatch;
     use arrow::{array::*, datatypes::*};
+    use std::sync::Arc;
     use DataType::*;
 
     macro_rules! fn_test_single_type {
@@ -242,9 +244,27 @@ mod tests {
         let a = BinaryArray::from_opt_vec(values);
         let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(a)])?;
         let mut vector = vec![0; 8192];
-        let row_offsets =
-            { write_batch_unchecked(&mut vector, 0, &batch, 0, schema.clone()) };
+        let row_offsets = { write_batch_unchecked(&mut vector, 0, &batch, 0, schema.clone()) };
         let output_batch = { read_as_batch(&mut vector, schema, row_offsets)? };
+        assert_eq!(batch, output_batch);
+        Ok(())
+    }
+
+    #[test]
+    fn test_single_binary_jit() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new("a", Binary, false)]));
+        let values: Vec<Option<&[u8]>> =
+            vec![Some(b"one"), Some(b"two"), None, Some(b""), Some(b"three")];
+        let a = BinaryArray::from_opt_vec(values);
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(a)])?;
+        let mut vector = vec![0; 8192];
+        let row_offsets = { write_batch_unchecked(&mut vector, 0, &batch, 0, schema.clone()) };
+
+        let mut store = CodeStore::new();
+        let mut jit = new_jit_with_reader();
+        cook_read_row(&schema, &mut jit, &mut store)?;
+
+        let output_batch = { read_as_batch_jni(&mut vector, schema, row_offsets, &store)? };
         assert_eq!(batch, output_batch);
         Ok(())
     }

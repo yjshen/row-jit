@@ -17,9 +17,10 @@
 
 //! Accessing row from raw bytes
 
-use crate::error::{DataFusionError, Result};
 use crate::bitmap::{all_valid, get_bit, null_width, NullBitsFormatter};
-use crate::{get_offsets, supported};
+use crate::error::{DataFusionError, Result};
+use crate::jit::{cook_code, run_code, CodeStore, JIT, JITABLE};
+use crate::{get_offsets, jit, supported};
 use arrow::array::*;
 use arrow::datatypes::{DataType, Schema};
 use arrow::error::Result as ArrowResult;
@@ -39,6 +40,25 @@ pub fn read_as_batch(
     for offset in offsets.iter().take(row_num) {
         row.point_to(*offset);
         read_row(&row, &mut output, &schema);
+    }
+
+    output.output().map_err(DataFusionError::ArrowError)
+}
+
+/// Read `data` of raw-bytes rows starting at `offsets` out to a record batch
+pub fn read_as_batch_jni(
+    data: &mut [u8],
+    schema: Arc<Schema>,
+    offsets: Vec<usize>,
+    code_store: &CodeStore,
+) -> Result<RecordBatch> {
+    let row_num = offsets.len();
+    let mut output = MutableRecordBatch::new(row_num, schema.clone());
+    let mut row = RowReader::new(&schema, data);
+
+    for offset in offsets.iter().take(row_num) {
+        row.point_to(*offset);
+        read_row_jit(&row, &mut output, code_store);
     }
 
     output.output().map_err(DataFusionError::ArrowError)
@@ -238,11 +258,7 @@ impl<'a> RowReader<'a> {
     }
 }
 
-fn read_row(
-    row: &RowReader,
-    batch: &mut MutableRecordBatch,
-    schema: &Arc<Schema>,
-) {
+fn read_row(row: &RowReader, batch: &mut MutableRecordBatch, schema: &Arc<Schema>) {
     if row.all_valid() {
         for ((col_idx, to), field) in batch
             .arrays
@@ -252,6 +268,11 @@ fn read_row(
         {
             read_field_null_free(to, field.data_type(), col_idx, row)
         }
+
+        for col_idx in 0..schema.fields().len() {
+            read_field_null_free(batch.arrays[col_idx].as_mut(), schema.fields()[col_idx].data_type(), col_idx, row)
+        }
+
     } else {
         for ((col_idx, to), field) in batch
             .arrays
@@ -262,6 +283,97 @@ fn read_row(
             read_field(to, field.data_type(), col_idx, row)
         }
     }
+}
+
+pub fn reader_handles() -> Vec<(String, *const u8)> {
+    let mut readers = Vec::with_capacity(30);
+    readers.push((
+        "read_field_bool_nf".to_owned(),
+        read_field_bool_nf as *const u8,
+    ));
+    readers.push(("read_field_u8_nf".to_owned(), read_field_u8_nf as *const u8));
+    readers.push((
+        "read_field_u16_nf".to_owned(),
+        read_field_u16_nf as *const u8,
+    ));
+    readers.push((
+        "read_field_u32_nf".to_owned(),
+        read_field_u32_nf as *const u8,
+    ));
+    readers.push((
+        "read_field_u64_nf".to_owned(),
+        read_field_u64_nf as *const u8,
+    ));
+    readers.push(("read_field_i8_nf".to_owned(), read_field_i8_nf as *const u8));
+    readers.push((
+        "read_field_i16_nf".to_owned(),
+        read_field_i16_nf as *const u8,
+    ));
+    readers.push((
+        "read_field_i32_nf".to_owned(),
+        read_field_i32_nf as *const u8,
+    ));
+    readers.push((
+        "read_field_i64_nf".to_owned(),
+        read_field_i64_nf as *const u8,
+    ));
+    readers.push((
+        "read_field_f32_nf".to_owned(),
+        read_field_f32_nf as *const u8,
+    ));
+    readers.push((
+        "read_field_f64_nf".to_owned(),
+        read_field_f64_nf as *const u8,
+    ));
+    readers.push((
+        "read_field_date32_nf".to_owned(),
+        read_field_date32_nf as *const u8,
+    ));
+    readers.push((
+        "read_field_date64_nf".to_owned(),
+        read_field_date64_nf as *const u8,
+    ));
+    readers.push((
+        "read_field_utf8_nf".to_owned(),
+        read_field_utf8_nf as *const u8,
+    ));
+    readers.push((
+        "read_field_binary_nf".to_owned(),
+        read_field_binary_nf as *const u8,
+    ));
+    readers.push(("get_array".to_owned(), get_array as *const u8));
+    readers
+}
+
+pub fn new_jit_with_reader() -> JIT {
+    JIT::new(reader_handles())
+}
+
+const READ_FN_NAME: &str = "Generate_read_row";
+
+pub fn cook_read_row(
+    schema: &Arc<Schema>,
+    jit: &mut jit::JIT,
+    code_store: &mut CodeStore,
+) -> Result<()> {
+    cook_code::<(&RowReader, &mut MutableRecordBatch), ()>(
+        jit,
+        JITABLE::ReadRowNullFree(schema.clone()),
+        READ_FN_NAME,
+        code_store,
+    )
+}
+
+extern "C" fn get_array(batch: &mut MutableRecordBatch, col_idx: usize) -> &mut Box<dyn ArrayBuilder> {
+    batch.arrays[col_idx].as_mut()
+}
+
+fn read_row_jit(
+    row: &RowReader,
+    batch: &mut MutableRecordBatch,
+    code_store: &CodeStore,
+) {
+    unsafe { run_code(code_store, READ_FN_NAME, (row, batch)) }
 }
 
 macro_rules! fn_read_field {
@@ -305,7 +417,7 @@ fn_read_field!(date32, Date32Builder);
 fn_read_field!(date64, Date64Builder);
 fn_read_field!(utf8, StringBuilder);
 
-fn read_field_binary(to: &mut Box<dyn ArrayBuilder>, col_idx: usize, row: &RowReader) {
+extern "C" fn read_field_binary(to: &mut Box<dyn ArrayBuilder>, col_idx: usize, row: &RowReader) {
     let to = to.as_any_mut().downcast_mut::<BinaryBuilder>().unwrap();
     if row.is_valid_at(col_idx) {
         to.append_value(row.get_binary(col_idx)).unwrap();
@@ -314,19 +426,18 @@ fn read_field_binary(to: &mut Box<dyn ArrayBuilder>, col_idx: usize, row: &RowRe
     }
 }
 
-fn read_field_binary_nf(to: &mut Box<dyn ArrayBuilder>, col_idx: usize, row: &RowReader) {
+extern "C" fn read_field_binary_nf(
+    to: &mut Box<dyn ArrayBuilder>,
+    col_idx: usize,
+    row: &RowReader,
+) {
     let to = to.as_any_mut().downcast_mut::<BinaryBuilder>().unwrap();
     to.append_value(row.get_binary(col_idx))
         .map_err(DataFusionError::ArrowError)
         .unwrap();
 }
 
-fn read_field(
-    to: &mut Box<dyn ArrayBuilder>,
-    dt: &DataType,
-    col_idx: usize,
-    row: &RowReader,
-) {
+fn read_field(to: &mut Box<dyn ArrayBuilder>, dt: &DataType, col_idx: usize, row: &RowReader) {
     use DataType::*;
     match dt {
         Boolean => read_field_bool(to, col_idx, row),

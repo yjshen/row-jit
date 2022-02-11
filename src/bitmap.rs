@@ -17,9 +17,7 @@
 
 //! General utilities for null bit section handling based on [arrow::util::bit_util]
 
-use arrow::util::bit_util::{
-    ceil, get_bit_raw, round_upto_power_of_2, set_bit_raw, unset_bit_raw,
-};
+use arrow::util::bit_util::{ceil, get_bit_raw, round_upto_power_of_2, set_bit_raw, unset_bit_raw};
 use std::fmt::Write;
 
 const BIT_MASK: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];

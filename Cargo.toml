@@ -9,3 +9,6 @@ edition = "2021"
 arrow = { git = "https://github.com/apache/arrow-rs.git", rev = "731e132489b99cd688f884642cf20de52aed24d0" }
 paste = "^1.0"
 rand = "0.8"
+cranelift = "0.81.0"
+cranelift-module = "0.81.0"
+cranelift-jit = "0.81.0"

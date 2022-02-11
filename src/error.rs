@@ -59,6 +59,7 @@ pub enum DataFusionError {
     /// Errors originating from outside DataFusion's core codebase.
     /// For example, a custom S3Error from the crate datafusion-objectstore-s3
     External(GenericError),
+    JIT(String),
 }
 
 impl From<io::Error> for DataFusionError {
@@ -98,8 +99,12 @@ impl Display for DataFusionError {
                 write!(f, "This feature is not implemented: {}", desc)
             }
             DataFusionError::Internal(ref desc) => {
-                write!(f, "Internal error: {}. This was likely caused by a bug in DataFusion's \
-                    code and we would welcome that you file an bug report in our issue tracker", desc)
+                write!(
+                    f,
+                    "Internal error: {}. This was likely caused by a bug in DataFusion's \
+                    code and we would welcome that you file an bug report in our issue tracker",
+                    desc
+                )
             }
             DataFusionError::Plan(ref desc) => {
                 write!(f, "Error during planning: {}", desc)
@@ -112,6 +117,9 @@ impl Display for DataFusionError {
             }
             DataFusionError::External(ref desc) => {
                 write!(f, "External error: {}", desc)
+            }
+            DataFusionError::JIT(ref desc) => {
+                write!(f, "JIT error: {}.", desc)
             }
         }
     }
