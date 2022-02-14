@@ -235,6 +235,7 @@ impl<'a> FunctionTranslator<'a> {
             Expr::Literal(literal) => {
                 let imm: i32 = literal.parse().unwrap();
                 self.builder.ins().iconst(self.int, i64::from(imm))
+                
             }
 
             Expr::Add(lhs, rhs) => {
@@ -292,101 +293,6 @@ impl<'a> FunctionTranslator<'a> {
         let variable = self.variables.get(&name).unwrap();
         self.builder.def_var(*variable, new_value);
         new_value
-    }
-
-    fn translate_icmp(&mut self, cmp: IntCC, lhs: Expr, rhs: Expr) -> Value {
-        let lhs = self.translate_expr(lhs);
-        let rhs = self.translate_expr(rhs);
-        let c = self.builder.ins().icmp(cmp, lhs, rhs);
-        self.builder.ins().bint(self.int, c)
-    }
-
-    fn translate_if_else(
-        &mut self,
-        condition: Expr,
-        then_body: Vec<Expr>,
-        else_body: Vec<Expr>,
-    ) -> Value {
-        let condition_value = self.translate_expr(condition);
-
-        let then_block = self.builder.create_block();
-        let else_block = self.builder.create_block();
-        let merge_block = self.builder.create_block();
-
-        // If-else constructs in the toy language have a return value.
-        // In traditional SSA form, this would produce a PHI between
-        // the then and else bodies. Cranelift uses block parameters,
-        // so set up a parameter in the merge block, and we'll pass
-        // the return values to it from the branches.
-        self.builder.append_block_param(merge_block, self.int);
-
-        // Test the if condition and conditionally branch.
-        self.builder.ins().brz(condition_value, else_block, &[]);
-        // Fall through to then block.
-        self.builder.ins().jump(then_block, &[]);
-
-        self.builder.switch_to_block(then_block);
-        self.builder.seal_block(then_block);
-        let mut then_return = self.builder.ins().iconst(self.int, 0);
-        for expr in then_body {
-            then_return = self.translate_expr(expr);
-        }
-
-        // Jump to the merge block, passing it the block return value.
-        self.builder.ins().jump(merge_block, &[then_return]);
-
-        self.builder.switch_to_block(else_block);
-        self.builder.seal_block(else_block);
-        let mut else_return = self.builder.ins().iconst(self.int, 0);
-        for expr in else_body {
-            else_return = self.translate_expr(expr);
-        }
-
-        // Jump to the merge block, passing it the block return value.
-        self.builder.ins().jump(merge_block, &[else_return]);
-
-        // Switch to the merge block for subsequent statements.
-        self.builder.switch_to_block(merge_block);
-
-        // We've now seen all the predecessors of the merge block.
-        self.builder.seal_block(merge_block);
-
-        // Read the value of the if-else by reading the merge block
-        // parameter.
-        let phi = self.builder.block_params(merge_block)[0];
-
-        phi
-    }
-
-    fn translate_while_loop(&mut self, condition: Expr, loop_body: Vec<Expr>) -> Value {
-        let header_block = self.builder.create_block();
-        let body_block = self.builder.create_block();
-        let exit_block = self.builder.create_block();
-
-        self.builder.ins().jump(header_block, &[]);
-        self.builder.switch_to_block(header_block);
-
-        let condition_value = self.translate_expr(condition);
-        self.builder.ins().brz(condition_value, exit_block, &[]);
-        self.builder.ins().jump(body_block, &[]);
-
-        self.builder.switch_to_block(body_block);
-        self.builder.seal_block(body_block);
-
-        for expr in loop_body {
-            self.translate_expr(expr);
-        }
-        self.builder.ins().jump(header_block, &[]);
-
-        self.builder.switch_to_block(exit_block);
-
-        // We've reached the bottom of the loop, so there will be no
-        // more backedges to the header to exits to the bottom.
-        self.builder.seal_block(header_block);
-        self.builder.seal_block(exit_block);
-
-        // Just return 0 for now.
-        self.builder.ins().iconst(self.int, 0)
     }
 
     fn translate_call(&mut self, name: String, args: Vec<Expr>) -> Value {

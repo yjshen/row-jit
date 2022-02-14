@@ -25,6 +25,7 @@ use arrow::array::*;
 use arrow::datatypes::{DataType, Schema};
 use arrow::error::Result as ArrowResult;
 use arrow::record_batch::RecordBatch;
+use cranelift::prelude::InstBuilder;
 use std::sync::Arc;
 
 /// Read `data` of raw-bytes rows starting at `offsets` out to a record batch
@@ -269,9 +270,19 @@ fn read_row(row: &RowReader, batch: &mut MutableRecordBatch, schema: &Arc<Schema
             read_field_null_free(to, field.data_type(), col_idx, row)
         }
 
-        for col_idx in 0..schema.fields().len() {
-            read_field_null_free(batch.arrays[col_idx].as_mut(), schema.fields()[col_idx].data_type(), col_idx, row)
-        }
+        let v: Value = self.builder.ins().iconst(types::I64, 0);
+        let v2: Value = self.translate_call();
+        let c0 = get_array(batch, 0);
+        read_field_bool_nf(c0, 0, row);
+        let c1 = get_array(batch, 1);
+        read_field_u8_nf(c1, 1, row);
+        let c2 = get_array(batch, 2);
+        read_field_utf8_nf(c2, 2, row);
+
+        
+
+        let mut index: usize = 0;
+        let name = format!("c{}", index);
 
     } else {
         for ((col_idx, to), field) in batch
@@ -365,7 +376,7 @@ pub fn cook_read_row(
 }
 
 extern "C" fn get_array(batch: &mut MutableRecordBatch, col_idx: usize) -> &mut Box<dyn ArrayBuilder> {
-    batch.arrays[col_idx].as_mut()
+    batch.arrays.as_mut()[col_idx]
 }
 
 fn read_row_jit(
